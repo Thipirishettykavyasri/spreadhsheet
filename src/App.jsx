@@ -5,11 +5,12 @@ import { loadSampleSmall, loadSampleLarge } from './fixtures/loadSample.js'
 import {
   executeSort,
   evaluateSheetFilters,
-  getDistinctColumnValues,
 } from './engine/sortFilter.js'
 import { executeQueryPlan } from './ai/queryExecutor.js'
 import { createProvider } from './ai/provider.js'
 import { extractJsonFromResponse, validateAction } from './ai/validator.js'
+
+import { applyFormatSheet } from './ai/formatApplier.js'
 const TOTAL_ROWS = 50
 const TOTAL_COLS = 50
 
@@ -26,12 +27,15 @@ export default function App() {
   const [cellStyles, setCellStyles] = useState({})
   const [sortColumn, setSortColumn] = useState(0)
 const [sortDirection, setSortDirection] = useState('asc')
-const [activeFilters, setActiveFilters] = useState({})
+const [_activeFilters, setActiveFilters] = useState({})
 const [filterColumn, setFilterColumn] = useState(0)
 const [filterText, setFilterText] = useState('')
 const [dataQuestion, setDataQuestion] = useState('')
 const [dataAnswer, setDataAnswer] = useState('')
-const [isAskingData, setIsAskingData] = useState(false)
+const [_isAskingData, setIsAskingData] = useState(false)
+const [formatPrompt, setFormatPrompt] = useState('')
+const [formatPreview, setFormatPreview] = useState(null)
+const [formatError, setFormatError] = useState('')
 
 
   const cellInputRef = useRef(null)
@@ -915,9 +919,10 @@ STRICT RULES:
             ? result.detail || result.error
             : JSON.stringify(result, null, 2)
         )
-      } else {
-        setDataAnswer('Formatting action is not connected yet.')
-      }
+      } else if (checked.action.type === 'format_sheet') {
+  setFormatPreview(checked.action)
+  setDataAnswer('Formatting preview ready. Review before applying.')
+}
     }
   } catch (error) {
     setDataAnswer(error.message || 'Something went wrong.')
@@ -928,6 +933,57 @@ STRICT RULES:
   >
     Ask Your Data
   </button>
+</div>
+<div className="toolbar-group">
+  <input
+    className="toolbar-select"
+    placeholder="Format with AI..."
+    value={formatPrompt}
+    onChange={(e) => setFormatPrompt(e.target.value)}
+  />
+  <button
+  className="toolbar-btn"
+  onClick={async () => {
+    if (!formatPrompt.trim()) {
+      setFormatError('Enter a formatting instruction first.')
+      return
+    }
+
+    setFormatError('')
+    setFormatPreview(null)
+    setDataAnswer('Generating formatting preview...')
+
+    try {
+      const provider = createProvider()
+      const response = await provider.complete({
+        system: `Return only JSON for a spreadsheet formatting action.
+Use type "format_sheet".
+For header formatting use headerStyle.
+For the Total column use columns with col 9.
+Example: {"type":"format_sheet","headerStyle":{"bold":true,"bg":"#d3d3d3"},"columns":[{"col":9,"style":{"numberFormat":"currency"}}]}`,
+        user: formatPrompt
+      })
+
+      const parsed = extractJsonFromResponse(response.text)
+      if (!parsed.success) {
+        throw new Error(parsed.detail || 'Could not parse AI response.')
+      }
+
+      const checked = validateAction(parsed.data)
+      if (!checked.valid || checked.action.type !== 'format_sheet') {
+        throw new Error(checked.detail || 'Invalid formatting action.')
+      }
+
+      setFormatPreview(checked.action)
+      setDataAnswer('Preview ready. Review the action below.')
+    } catch (error) {
+      setFormatError(error.message || 'Formatting failed.')
+      setDataAnswer('')
+    }
+  }}
+>
+  Format with AI
+</button>
 </div>
 
 {dataAnswer && (
@@ -961,9 +1017,55 @@ STRICT RULES:
             </table>
           )
         }
-      } catch {}
+      } catch (error){
+         console.error('Failed to render AI query result:', error)
+      }
       return <pre style={{ whiteSpace: 'pre-wrap' }}>{dataAnswer}</pre>
     })()}
+  </div>
+)}
+{formatError && (
+  <p style={{ color: '#d93025' }}>{formatError}</p>
+)}
+
+{formatPreview && (
+  <div style={{ padding: 12, border: '1px solid #ccc', margin: 8 }}>
+    <strong>Formatting Preview</strong>
+    <pre style={{ whiteSpace: 'pre-wrap' }}>
+      {JSON.stringify(formatPreview, null, 2)}
+    </pre>
+
+    <button
+      className="toolbar-btn"
+      onClick={() => {
+        try {
+          const result = applyFormatSheet(engine, formatPreview)
+          if (result.result === 'SUCCESS') {
+            setCellStyles({})
+            forceRerender()
+            setDataAnswer('Formatting applied successfully.')
+            setFormatPreview(null)
+          } else {
+            setFormatError(result.detail || result.error || 'No formatting changes applied.')
+          }
+        } catch (error) {
+          setFormatError(error.message || 'Could not apply formatting.')
+        }
+      }}
+    >
+      Apply
+    </button>
+
+    <button
+      className="toolbar-btn"
+      onClick={() => {
+        setFormatPreview(null)
+        setFormatError('')
+        setDataAnswer('Formatting discarded.')
+      }}
+    >
+      Discard
+    </button>
   </div>
 )}
 

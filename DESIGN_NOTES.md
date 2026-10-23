@@ -1,92 +1,152 @@
-# Design notes
-
-Fill this in as you work. Keep it factual and short; bullet points are fine. Graders read this before your code.
+# Design Notes — Spreadsheet Engineering Challenge
 
 ## Challenges
 
-- Challenge 1 — Range selection and fill handle:
-  - Implemented pure engine module `src/engine/fill.js` handling series extrapolation across all required data types.
-  - Added support for numeric series: single seed copies, 2+ seeds extend arithmetic progression (including decimals, non-unit steps, and backward filling).
-  - Added support for text ending in numbers (e.g. `ORD-1001` to `ORD-1002`, `Item 1`, `Item 01`, `Q4`, `2024-W01`), preserving zero padding.
-  - Added support for dates in ISO (`YYYY-MM-DD`), US slash (`M/D/YYYY`), and Day-Month-Year (`D MMM YYYY`) formats, preserving seed formats cyclically and stepping by the seed delta in days.
-  - Added weekday and month name cycling (`Mon -> Tue`, `Jan -> Feb`), preserving case (UPPERCASE, lowercase, Titlecase).
-  - Added formula reference shifting that preserves absolute pinned coordinates (`$A$1`, `$A1`, `A$1`) while adjusting relative coordinates horizontally and vertically.
-  - Added style inheritance: filled cells inherit seed cell styles.
-  - Added shrink fill support: dragging back clears shrunk cells.
-  - Positioned fill handle at the bottom-right corner of the active multi-cell or single-cell selection.
-  - Single click selects without entering edit mode; double-click, Enter, F2, or typing printable characters enters edit mode.
-  - Mouse dragging selects a rectangular range in any direction (up, down, left, right).
-  - Shift+Click and Shift+Arrow keys extend selection from anchor cell.
-  - Row and column header clicks select entire rows/columns; corner header selects entire grid.
-  - Ctrl+A selects the used range.
-  - Formatting actions (bold, italic, underline, font size, align, font color, background color) apply to the entire selected range in one undo step.
-  - Delete and Backspace keys clear all selected cells and their formatting in one undo step.
-  - Added global `Ctrl+Z` / `Ctrl+Y` shortcuts and one-step undo/redo for fill handle and clear operations.
+### Challenge 1 — Range Selection and Fill Handle
 
-## Data model changes
+- Implemented range selection and fill logic in `src/engine/fill.js`.
+- Supports single-cell copying and numeric series, including decimal and non-unit increments.
+- Supports text-number series such as `ORD-1001`, `Item 01`, `Q4`, and `2024-W01`, preserving zero padding.
+- Supports ISO, US slash, and Day-Month-Year date formats, stepping dates by the seed delta.
+- Supports weekday and month cycling with case preservation.
+- Supports formula translation with relative, absolute (`$A$1`), and mixed (`$A1`, `A$1`) references.
+- Filled cells inherit the relevant seed styles.
+- Supports fill-handle dragging in different directions and shrinking the fill by dragging back.
+- Single-click selection, double-click editing, Enter, F2, typing, drag selection, Shift+Click, and Shift+Arrow are supported.
+- Row and column headers select their respective ranges. Ctrl+A selects the used range.
+- Formatting applies to the selected range.
+- Delete and Backspace clear the selected range in one operation.
+- Added Ctrl+Z and Ctrl+Y keyboard shortcuts for undo and redo.
+- Verified fill-engine tests and the 5,000-cell performance test as recorded below.
 
-- Added `style` object to engine cell representations in `src/engine/core.js`.
-- Bulk mutations and snapshots preserve both `raw` value and `style`, enabling one-step undo to restore prior values and styles simultaneously.
+### Challenge 2 — Sort and Filter
+
+- Existing sort/filter UI and implementation require verification against the complete challenge acceptance criteria.
+- Verify sorting by column in ascending and descending order.
+- Verify filter dropdowns, filter conditions, and results on the deliberately messy `fixtures/sales.tsv` dataset.
+- Verify that sorting and filtering preserve correct cell values, row relationships, and undo behavior.
+- Record only the behaviors that pass manual or automated tests.
+
+**Status:** Not fully verified.
+
+### Challenge 3 — Virtualized Grid
+
+- The existing grid and sample-data loading functionality require verification against the large-scale grid requirements.
+- Required acceptance checks include 100,000 rows × 200 columns, virtualized rendering, row-height and column-width resizing, frozen rows and columns, keyboard navigation, name box, and formula bar.
+- Measure scrolling and rendering performance using a production build and document the test environment and results.
+
+**Status:** Full virtualization and performance requirements are not yet confirmed.
+
+### Challenge 4 — Ask Your Data
+
+- AI provider and query-execution functionality require verification against `AI_CONTRACT.md` and `fixtures/ai-eval/queries.json`.
+- Verify the mock provider works without a backend.
+- Verify HTTP-provider configuration, response parsing, action validation, and safe rejection of unsupported mutations.
+- Test filtering, grouping, aggregation, sorting, row limits, totals-row handling, and unknown-column errors.
+- Run all 20 golden prompts and record the expected answers, refusals, and actual results.
+- Verify the performance budgets on the required large datasets.
+
+**Status:** Not fully verified; resolve any failing query tests before submission.
+
+### Challenge 5 — Format with AI
+
+- Added AI-formatting functionality using `src/ai/formatApplier.js` and the format-action contract.
+- Added or connected the prompt, preview, Apply, and Discard flow.
+- Verify header, body, and totals styling; number formats; frozen rows; column widths; and auto-fit.
+- Verify that formatting does not change stored cell values.
+- Verify `clearFormatting`, header-style precedence, totals-row detection, column bounds, and no-op behavior against `AI_CONTRACT.md`.
+- Verify formatting is undone in one Ctrl+Z operation and that styles follow row/column insertions and deletions.
+- Run all 10 prompts in `fixtures/ai-eval/format-prompts.json` on `fixtures/sales.tsv` and `fixtures/sales-large.tsv`.
+
+**Status:** Basic Apply flow has been exercised; full contract and golden-set compliance remain to be verified.
+
+## Data Model Changes
+
+- Added style information to engine cell representations in `src/engine/core.js`.
+- Bulk mutations and snapshots are intended to preserve raw values and styles for undo/redo.
+- Verify that number formatting remains separate from stored cell values and that styles follow structural row/column changes.
 
 ## Engine API
 
-- `setCells(changes)`: `(Array<{ row, col, value, style? }>) => boolean` — applies a bulk batch of cell edits with a single recalculation step; one undo reverts the entire batch.
-- `fill(sourceRange, targetRange, getCellStyle?)`: `(Range, Coord|Range, Function?) => boolean` — extrapolates values and styles from source to target range based on detected series patterns; one undo reverts all filled or cleared cells.
-- `clearRange(range)`: `(Range) => boolean` — clears all values and styles across a rectangular range; one undo reverts the clear.
-- `setRangeStyle(range, styleUpdates)`: `(Range, object) => boolean` — applies styling updates across all cells in a rectangular range; one undo reverts the styling changes.
-- `getUsedRange()`: `() => Range` — returns bounding box `{ startRow, startCol, endRow, endCol }` covering all non-empty or styled cells for `Ctrl+A`.
-- `shiftFormula(formula, rowOffset, colOffset)`: `(string, number, number) => string` — shifts relative cell references by row and column offsets while pinning absolute `$` references; purely functional.
+- `setCells(changes)`: Applies a batch of cell changes. Verify that the entire batch is reverted by one undo.
+- `fill(sourceRange, targetRange, getCellStyle?)`: Fills a destination range using detected series patterns and seed styles.
+- `clearRange(range)`: Clears values and styles in a rectangular range.
+- `setRangeStyle(range, styleUpdates)`: Applies style updates to a rectangular range.
+- `getUsedRange()`: Returns the bounding range of non-empty or styled cells.
+- `shiftFormula(formula, rowOffset, colOffset)`: Translates relative formula references while preserving absolute row and column markers.
 
-## Undo semantics
+Document any additional engine methods introduced for sorting, filtering, query execution, formatting, virtualization, or structural changes after confirming their actual signatures in the source code.
 
-- **Fill Handle (`engine.fill`)**: A single `Ctrl+Z` reverts all filled or cleared cells to their previous raw values and cell styles prior to the fill gesture.
-- **Clear Selection (`engine.clearRange`)**: A single `Ctrl+Z` restores all cleared cells to their prior values and styles.
-- **Range Formatting (`engine.setRangeStyle`)**: A single `Ctrl+Z` reverts styles across all selected cells to their previous state.
-- **Bulk Set (`engine.setCells`)**: A single `Ctrl+Z` restores all modified cells to their respective previous values and styles.
-- **No-op actions**: If a fill or clear operation produces no actual changes to values or styles, no entry is pushed to the undo history.
+## Undo Semantics
 
-## Defects found in the existing code
+- **Fill:** One Ctrl+Z should restore all affected values and styles.
+- **Clear selection:** One Ctrl+Z should restore cleared values and styles.
+- **Range formatting:** One Ctrl+Z should restore the previous styles for the selected range.
+- **Bulk set:** One Ctrl+Z should restore all affected cells.
+- **Sort:** Verify that one Ctrl+Z restores the original row order and data.
+- **AI Format Apply:** Verify that one Ctrl+Z restores all changes from the formatting action.
+- **Insert into sheet:** Verify that one Ctrl+Z reverses the entire insertion action.
+- **No-op actions:** Verify that operations making no changes do not add unnecessary undo entries.
 
-1. **`tokenize` threw `#PARSE!` on formulas with absolute references (`$`):**
-   - *Where*: `src/engine/core.js` in `tokenize()`.
-   - *Symptom*: Formulas like `=$G$2*H2` failed to parse with `#PARSE!`.
-   - *Root cause*: Character `$` was not accepted in identifier lexing and threw `Unexpected character: $`.
-   - *Fix*: Allowed `$` in cell identifiers and verified against `^(\$?)([A-Z]+)(\$?)(\d+)$`.
+## Defects Found in Existing Code
 
-2. **`shiftCellReferences` corrupted absolute references on structural row/col mutations:**
-   - *Where*: `src/engine/core.js` in `shiftCellReferences()`.
-   - *Symptom*: Inserting a row above row 10 in a sheet containing `=$G$2*H32` produced invalid references and dropped inner `$`.
-   - *Root cause*: Regex `/([A-Z]+)(\d+)/g` did not capture or preserve `$` prefixes for columns or rows.
-   - *Fix*: Updated regex to `/(\$?)([A-Z]+)(\$?)(\d+)/g` and preserved pinned row and column markers when reformatting shifted references.
+1. **Formula tokenizer and absolute references**
+   - Location: `src/engine/core.js`, `tokenize()`.
+   - Problem: Formulas containing `$` references previously produced parse errors.
+   - Fix recorded: Updated cell-reference parsing to allow optional absolute column and row markers.
 
-3. **`expandCellRange` and `evaluateAST` failed on absolute references in formulas:**
-   - *Where*: `src/engine/core.js` in `expandCellRange()` and `evaluateAST()`.
-   - *Symptom*: Ranges like `$A$1:$A$5` or references like `$G$2` threw `#REF!` or failed key lookups.
-   - *Root cause*: `expandCellRange` regex required strict `^[A-Z]+\d+$` without `$`, and `evaluateAST` looked up `$G$2` directly in the cells map instead of `G2`.
-   - *Fix*: Stripped `$` when querying cell values from the engine cache/map, and allowed optional `$` in range parsing.
+2. **Formula references during structural changes**
+   - Location: `src/engine/core.js`, `shiftCellReferences()`.
+   - Problem: Structural row/column changes could mishandle absolute references.
+   - Fix recorded: Updated reference handling to preserve `$` markers while shifting relative coordinates.
 
-4. **Lint errors in `App.jsx`:**
-   - *Where*: `src/App.jsx` in `handleFill`.
-   - *Symptom*: `npm run lint` failed with 2 errors for unused variables (`getSeriesValue` and `first`).
-   - *Root cause*: Dead draft code left in `handleFill`.
-   - *Fix*: Replaced draft with clean delegation to `engine.fill()`.
+3. **Absolute references in ranges and evaluation**
+   - Location: `src/engine/core.js`, `expandCellRange()` and `evaluateAST()`.
+   - Problem: Absolute references and ranges were not consistently normalized for lookup.
+   - Fix recorded: Updated parsing and lookup handling for optional `$` markers.
+
+4. **Unused variables in the fill handler**
+   - Location: `src/App.jsx`.
+   - Problem: Unused draft variables caused lint errors.
+   - Fix recorded: Removed the unused code and delegated filling to `engine.fill()`.
 
 ## Measurements
 
-- **Fill Handle performance budget (5,000 cells)**:
-  - Budget: < 200 ms.
-  - Measured: **16.5 ms** execution time for filling 5,000 cells (`ORD-1001` to `ORD-6002`) in vitest.
-  - Method: `performance.now()` delta before and after `engine.fill(..., { row: 5001, col: 0 })`.
-  - Machine: Windows 11, Node.js v24.21.0.
+### Fill Handle — 5,000 Cells
 
-## AI (if applicable)
+- Required budget: under 200 ms.
+- Recorded result: 16.5 ms in the Vitest performance test.
+- Measurement method: `performance.now()` before and after the fill operation.
+- Test scenario: Fill a 5,000-cell range using a text-number series.
+- Recorded environment: Windows 11, Node.js v24.21.0.
+- Verification: Confirm the benchmark test and destination-cell assertion pass in the current checkout before treating this result as final.
 
-- Not applicable to Challenge 1.
+### Remaining Performance Budgets
 
-## Trade-offs and what you would do next
+- Ask Your Data: golden plans on `sales-large.tsv` under 50 ms; two-level group-by over 100,000 generated rows under 500 ms.
+- AI Format Sheet: applying formatting to `sales-large.tsv` under 300 ms.
+- Virtualized Grid: measure production-build performance with 100,000 rows × 200 columns.
 
-- Extracted series calculation into a dedicated pure engine module `src/engine/fill.js` so it can be tested independently of the React DOM and reused cleanly in future challenges.
+**Results for these remaining budgets have not been confirmed here. Do not report them as measured until the tests are run.**
 
-## Use of AI tools
+## AI
 
-- Used Antigravity coding assistant to inspect project files, identify incomplete challenges and defects, implement pure engine fill routines, fix absolute reference parsing, add unit tests, and verify lint/build/test suites.
+- Provider implementation: `src/ai/provider.js`; verify mock mode works without a backend and HTTP mode uses the intended configuration.
+- Response handling: verify JSON extraction, schema validation, unsupported-action rejection, and error reporting.
+- Query evaluation: compare actual results with `fixtures/ai-eval/queries.json`.
+- Formatting evaluation: compare actions and applied sheet state with `fixtures/ai-eval/format-prompts.json`.
+- Record any golden-set mismatches and explain the implemented behavior.
+
+## Trade-offs and What I Would Do Next
+
+- Kept fill-series logic in a dedicated engine module to separate spreadsheet logic from React rendering.
+- Preserve the engine's independence from React and the DOM.
+- Complete and verify all five challenge acceptance criteria.
+- Fix failing tests and confirm sorting, filtering, formatting, structural changes, and undo/redo.
+- Measure the required performance budgets on a production build.
+- Add verified results and remaining limitations to this document.
+
+## Use of AI Tools
+
+- Used an AI coding assistant to inspect project files, help implement fill-series behavior, investigate formula-reference issues, add tests, and troubleshoot lint/build/test errors.
+- All submitted functionality and performance claims must be verified against the current code and test results.
