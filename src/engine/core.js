@@ -1,3 +1,6 @@
+import { computeFillChanges, indexToColumnLetter, shiftFormula } from './fill.js'
+import { executeSort, parseNumberValue } from './sortFilter.js'
+
 // ─────────────────────────────────────────────────────────────
 //  Operator precedence for expression parsing
 // ─────────────────────────────────────────────────────────────
@@ -18,20 +21,14 @@ function columnLetterToIndex(columnLetter) {
 }
 
 function indexToCellKey(row, col) {
-    let columnLabel = ''
-    let colNumber = col + 1
-    while (colNumber > 0) {
-        colNumber--
-        columnLabel = String.fromCharCode(65 + (colNumber % 26)) + columnLabel
-        colNumber = Math.floor(colNumber / 26)
-    }
-    return columnLabel + (row + 1)
+    return indexToColumnLetter(col) + (row + 1)
 }
 
 function parseCellKey(cellKey) {
-    const match = cellKey.match(/^([A-Z]+)(\d+)$/)
+    if (!cellKey || typeof cellKey !== 'string') return null
+    const match = cellKey.match(/^(\$?)([A-Za-z]+)(\$?)(\d+)$/)
     if (!match) return null
-    return { row: parseInt(match[2]) - 1, col: columnLetterToIndex(match[1]) }
+    return { row: parseInt(match[4], 10) - 1, col: columnLetterToIndex(match[2].toUpperCase()) }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -49,6 +46,8 @@ function createDependencyGraph() {
         reverseEdges.get(dependsOn).add(cell)
     }
 
+    // Remove only outgoing edges (what `cell` depends on). Incoming edges
+    // (who depends on `cell`) must stay so dependents still recalculate.
     function removeAllDependencies(cell) {
         const deps = forwardEdges.get(cell)
         if (deps) {
@@ -60,16 +59,6 @@ function createDependencyGraph() {
             }
             forwardEdges.delete(cell)
         }
-        const dependents = reverseEdges.get(cell)
-        if (dependents) {
-            for (const dependent of dependents) {
-                if (forwardEdges.has(dependent)) {
-                    forwardEdges.get(dependent).delete(cell)
-                    if (forwardEdges.get(dependent).size === 0) forwardEdges.delete(dependent)
-                }
-            }
-            reverseEdges.delete(cell)
-        }
     }
 
     function getDependencies(cell) {
@@ -80,14 +69,31 @@ function createDependencyGraph() {
         return reverseEdges.get(cell) || new Set()
     }
 
+    function hasDependents(cell) {
+        const deps = reverseEdges.get(cell)
+        return deps !== undefined && deps.size > 0
+    }
+
+    function hasDependencies(cell) {
+        const deps = forwardEdges.get(cell)
+        return deps !== undefined && deps.size > 0
+    }
+
+    function isEmpty() {
+        return forwardEdges.size === 0 && reverseEdges.size === 0
+    }
+
     function getAllDependentsRecursive(cell, visited = new Set()) {
         if (visited.has(cell)) return new Set()
         visited.add(cell)
         const result = new Set()
-        for (const dependent of getDependents(cell)) {
-            result.add(dependent)
-            for (const indirect of getAllDependentsRecursive(dependent, visited)) {
-                result.add(indirect)
+        const dependents = reverseEdges.get(cell)
+        if (dependents && dependents.size > 0) {
+            for (const dependent of dependents) {
+                result.add(dependent)
+                for (const indirect of getAllDependentsRecursive(dependent, visited)) {
+                    result.add(indirect)
+                }
             }
         }
         return result
@@ -126,13 +132,17 @@ function createDependencyGraph() {
         for (const cell of affectedCells) {
             if (inDegree.get(cell) === 0) queue.push(cell)
         }
-        while (queue.length > 0) {
-            const cell = queue.shift()
+        let head = 0
+        while (head < queue.length) {
+            const cell = queue[head++]
             sorted.push(cell)
-            for (const dependent of getDependents(cell)) {
-                if (affectedCells.has(dependent)) {
-                    inDegree.set(dependent, inDegree.get(dependent) - 1)
-                    if (inDegree.get(dependent) === 0) queue.push(dependent)
+            const dependents = reverseEdges.get(cell)
+            if (dependents) {
+                for (const dependent of dependents) {
+                    if (affectedCells.has(dependent)) {
+                        inDegree.set(dependent, inDegree.get(dependent) - 1)
+                        if (inDegree.get(dependent) === 0) queue.push(dependent)
+                    }
                 }
             }
         }
@@ -146,9 +156,13 @@ function createDependencyGraph() {
 
     return {
         addDependency,
+        removeOutgoingDependencies: removeAllDependencies,
         removeAllDependencies,
         getDependencies,
         getDependents,
+        hasDependents,
+        hasDependencies,
+        isEmpty,
         getAllDependentsRecursive,
         hasCycle,
         topologicalSort,
@@ -200,20 +214,27 @@ function tokenize(expression) {
             continue
         }
 
-        if ((char >= 'A' && char <= 'Z') || (char >= 'a' && char <= 'z')) {
+        if (char === '$' || (char >= 'A' && char <= 'Z') || (char >= 'a' && char <= 'z')) {
             let identifier = ''
-            while (position < expression.length && ((expression[position] >= 'A' && expression[position] <= 'Z') || (expression[position] >= 'a' && expression[position] <= 'z') || (expression[position] >= '0' && expression[position] <= '9'))) {
+            while (position < expression.length && (
+                expression[position] === '$' ||
+                (expression[position] >= 'A' && expression[position] <= 'Z') ||
+                (expression[position] >= 'a' && expression[position] <= 'z') ||
+                (expression[position] >= '0' && expression[position] <= '9')
+            )) {
                 identifier += expression[position].toUpperCase()
                 position++
             }
             if (position < expression.length && expression[position] === ':') {
                 tokens.push({ type: 'cell', value: identifier })
             } else {
-                const cellMatch = identifier.match(/^([A-Z]+)(\d+)$/)
+                const cellMatch = identifier.match(/^(\$?)([A-Z]+)(\$?)(\d+)$/)
                 if (cellMatch) {
                     tokens.push({ type: 'cell', value: identifier })
-                } else {
+                } else if (!identifier.includes('$')) {
                     tokens.push({ type: 'function', value: identifier })
+                } else {
+                    throw new Error(`Unexpected character: $`)
                 }
             }
             continue
@@ -274,14 +295,25 @@ function parseTokensToAST(tokens) {
             }
             position++
         } else if (token.type === 'range') {
-            if (outputQueue.length < 2) throw new Error('Invalid range syntax')
-            const endCell = outputQueue.pop()
+            const endCell = tokens[position + 1]
+
+            if (outputQueue.length < 1 || !endCell || endCell.type !== 'cell') {
+                throw new Error('Invalid range syntax')
+            }
+
             const startCell = outputQueue.pop()
-            if (startCell.type !== 'cell' || endCell.type !== 'cell') {
+
+            if (startCell.type !== 'cell') {
                 throw new Error('Range must be between two cell references')
             }
-            outputQueue.push({ type: 'range', start: startCell.value, end: endCell.value })
-            position++
+
+            outputQueue.push({
+                type: 'range',
+                start: startCell.value,
+                end: endCell.value
+            })
+
+            position += 2
         } else {
             position++
         }
@@ -332,14 +364,14 @@ function buildASTFromRPN(rpnTokens) {
 // ─────────────────────────────────────────────────────────────
 
 function expandCellRange(startKey, endKey) {
-    const startMatch = startKey.match(/^([A-Z]+)(\d+)$/)
-    const endMatch = endKey.match(/^([A-Z]+)(\d+)$/)
+    const startMatch = startKey.match(/^(\$?)([A-Z]+)(\$?)(\d+)$/)
+    const endMatch = endKey.match(/^(\$?)([A-Z]+)(\$?)(\d+)$/)
     if (!startMatch || !endMatch) throw new Error('REF')
 
-    const startCol = columnLetterToIndex(startMatch[1])
-    const startRow = parseInt(startMatch[2]) - 1
-    const endCol = columnLetterToIndex(endMatch[1])
-    const endRow = parseInt(endMatch[2]) - 1
+    const startCol = columnLetterToIndex(startMatch[2])
+    const startRow = parseInt(startMatch[4], 10) - 1
+    const endCol = columnLetterToIndex(endMatch[2])
+    const endRow = parseInt(endMatch[4], 10) - 1
 
     const cells = []
     for (let r = Math.min(startRow, endRow); r <= Math.max(startRow, endRow); r++) {
@@ -350,13 +382,29 @@ function expandCellRange(startKey, endKey) {
     return cells
 }
 
+function coerceNumber(v) {
+    if (typeof v === 'number') return v
+    if (v === '' || v == null) return 0
+    if (typeof v === 'string') {
+        const s = v.trim()
+        if (s.toLowerCase() === 'n/a') return NaN
+        const hasPercent = s.endsWith('%')
+        const cleaned = s.replace(/[$,\s]/g, '').replace(/%$/, '')
+        if (/^-?\d+(\.\d+)?$/.test(cleaned)) {
+            const num = parseFloat(cleaned)
+            return hasPercent ? num / 100 : num
+        }
+    }
+    return Number(v)
+}
+
 function evaluateAST(ast, getCellValue, visited = new Set()) {
     if (!ast) return 0
 
     if (ast.type === 'number') return ast.value
 
     if (ast.type === 'cell') {
-        const key = ast.value
+        const key = ast.value.toUpperCase().replace(/\$/g, '')
         if (visited.has(key)) throw new Error('CIRCULAR')
         visited.add(key)
         const value = getCellValue(key, visited)
@@ -369,14 +417,16 @@ function evaluateAST(ast, getCellValue, visited = new Set()) {
     if (ast.type === 'binary') {
         const leftVal = evaluateAST(ast.left, getCellValue, visited)
         const rightVal = evaluateAST(ast.right, getCellValue, visited)
-        if (typeof leftVal !== 'number' || typeof rightVal !== 'number') throw new Error('VALUE')
+        const numLeft = coerceNumber(leftVal)
+        const numRight = coerceNumber(rightVal)
+        if (isNaN(numLeft) || isNaN(numRight)) throw new Error('VALUE')
         switch (ast.operator) {
-            case '+': return leftVal + rightVal
-            case '-': return leftVal - rightVal
-            case '*': return leftVal * rightVal
+            case '+': return numLeft + numRight
+            case '-': return numLeft - numRight
+            case '*': return numLeft * numRight
             case '/':
-                if (rightVal === 0) throw new Error('VALUE')
-                return leftVal / rightVal
+                if (numRight === 0) throw new Error('VALUE')
+                return numLeft / numRight
             default: throw new Error('VALUE')
         }
     }
@@ -388,7 +438,7 @@ function evaluateAST(ast, getCellValue, visited = new Set()) {
             visited.add(cellKey)
             const value = getCellValue(cellKey, visited)
             visited.delete(cellKey)
-            const num = parseFloat(value)
+            const num = coerceNumber(value)
             return isNaN(num) ? 0 : num
         })
 
@@ -415,11 +465,13 @@ function evaluateFormula(expression, getCellValue) {
         const tokens = tokenize(formulaBody)
         const ast = parseTokensToAST(tokens)
         const result = evaluateAST(ast, getCellValue)
+
         return { value: result, error: null }
     } catch (error) {
         if (error.message === 'CIRCULAR') return { value: null, error: '#CYCLE!' }
         if (error.message === 'REF') return { value: null, error: '#REF!' }
         if (error.message === 'VALUE') return { value: null, error: '#VALUE!' }
+
         return { value: null, error: '#PARSE!' }
     }
 }
@@ -431,39 +483,29 @@ function evaluateFormula(expression, getCellValue) {
 function shiftCellReferences(formula, rowShift, colShift, atIndex, isColumnOperation = false) {
     if (!formula || !formula.startsWith('=')) return formula
 
-    // Shift cell references in formulas when rows/columns are inserted or deleted
-    // Note: This function modifies ALL cell references in the formula, including those
-    // in ranges. The logic ensures references shift correctly based on the operation type.
-    return formula.replace(/([A-Z]+)(\d+)/g, (match, colLetter, rowStr) => {
-        const colIdx = columnLetterToIndex(colLetter)
-        const rowIdx = parseInt(rowStr) - 1
+    return formula.replace(/(\$?)([A-Za-z]+)(\$?)(\d+)/g, (match, colPin, colLetter, rowPin, rowStr) => {
+        const colIdx = columnLetterToIndex(colLetter.toUpperCase())
+        const rowIdx = parseInt(rowStr, 10) - 1
         let newRow = rowIdx
         let newCol = colIdx
 
         if (isColumnOperation) {
-            // For column operations, only shift columns at or after the insertion/deletion point
             if (colIdx >= atIndex) newCol = colIdx + colShift
         } else {
-            // For row operations, only shift rows at or after the insertion/deletion point
             if (rowIdx >= atIndex) newRow = rowIdx + rowShift
         }
 
-        // Preserve original reference if shifting would result in invalid coordinates
-        // This prevents formulas from breaking when rows/cols are deleted at boundaries
         if (newRow < 0 || newCol < 0) return match
-        return indexToCellKey(newRow, newCol)
+        return `${colPin}${indexToColumnLetter(newCol)}${rowPin}${newRow + 1}`
     })
 }
 
 function extractCellReferences(formula) {
     const references = new Set()
-    // Extract cell references using regex
-    // Note: This regex matches cell references like A1, B2, AA10, etc.
-    // It does NOT extract individual cells from ranges (e.g., A1:A5 only extracts A1 and A5)
-    const regex = /([A-Z]+\d+)/g
+    const regex = /(\$?)([A-Za-z]+)(\$?)(\d+)/g
     let match
     while ((match = regex.exec(formula)) !== null) {
-        references.add(match[1])
+        references.add(match[2].toUpperCase() + match[4])
     }
     return references
 }
@@ -472,21 +514,39 @@ function extractCellReferences(formula) {
 //  Main engine factory
 // ─────────────────────────────────────────────────────────────
 
+const COORD_STRIDE = 4096
+
+function stylesEqual(a, b) {
+    if (a === b) return true
+    if (!a || !b) return !a && !b
+    if (a.bold !== b.bold) return false
+    if (a.italic !== b.italic) return false
+    if (a.underline !== b.underline) return false
+    if (a.bg !== b.bg) return false
+    if (a.color !== b.color) return false
+    if (a.align !== b.align) return false
+    if (a.fontSize !== b.fontSize) return false
+    if (a.numberFormat !== b.numberFormat) return false
+    return true
+}
+
 export function createEngine(initialRows = 50, initialCols = 50) {
     let rows = initialRows
     let cols = initialCols
     const cells = new Map()
+    const cellsByIndex = new Map()
     const graph = createDependencyGraph()
     const dirtyCells = new Set()
     const computedCache = new Map()
     const undoStack = []
     const redoStack = []
 
-    // Internal generation counter — incremented on every structural mutation.
-    // Used by the cache to validate entries and by the engine to track state integrity.
     let _generation = 0
     let _batchMode = false
     let _batchCallbacks = []
+    let usedMaxRow = -1
+    let usedMaxCol = -1
+    let usedRangeDirty = false
 
     // ── Internal helpers ──
 
@@ -494,8 +554,41 @@ export function createEngine(initialRows = 50, initialCols = 50) {
         return indexToCellKey(row, col)
     }
 
+    function coordIndex(row, col) {
+        return row * COORD_STRIDE + col
+    }
+
     function cellCoords(key) {
         return parseCellKey(key)
+    }
+
+    function noteOccupied(row, col) {
+        if (row > usedMaxRow) usedMaxRow = row
+        if (col > usedMaxCol) usedMaxCol = col
+    }
+
+    function rebuildUsedRange() {
+        usedMaxRow = -1
+        usedMaxCol = -1
+        for (const [idx, cell] of cellsByIndex.entries()) {
+            if (cell && (cell.raw !== '' || cell.style)) {
+                const row = (idx / COORD_STRIDE) | 0
+                const col = idx - row * COORD_STRIDE
+                if (row > usedMaxRow) usedMaxRow = row
+                if (col > usedMaxCol) usedMaxCol = col
+            }
+        }
+        usedRangeDirty = false
+    }
+
+    function rebuildIndexFromCells() {
+        cellsByIndex.clear()
+        for (const [key, value] of cells.entries()) {
+            const coords = cellCoords(key)
+            if (!coords) continue
+            cellsByIndex.set(coordIndex(coords.row, coords.col), value)
+        }
+        rebuildUsedRange()
     }
 
     function isValidCellKey(key) {
@@ -504,19 +597,17 @@ export function createEngine(initialRows = 50, initialCols = 50) {
     }
 
     function updateDependencies(cell, rawFormula) {
-        // Extract all cell references from the formula
-        // Note: This includes references in ranges (e.g., A1:A5 includes A1, A2, A3, A4, A5)
-        // but the current implementation only tracks the range endpoints
         for (const ref of extractCellReferences(rawFormula)) {
             if (isValidCellKey(ref)) graph.addDependency(cell, ref)
         }
-        // TODO: Consider tracking individual cells within ranges for more granular dependency tracking
     }
 
     function markCellDirty(cell) {
         dirtyCells.add(cell)
-        for (const dependent of graph.getAllDependentsRecursive(cell)) {
-            dirtyCells.add(dependent)
+        if (graph.hasDependents(cell)) {
+            for (const dependent of graph.getAllDependentsRecursive(cell)) {
+                dirtyCells.add(dependent)
+            }
         }
     }
 
@@ -532,9 +623,6 @@ export function createEngine(initialRows = 50, initialCols = 50) {
 
         if (computedCache.has(cellKey)) {
             const cached = computedCache.get(cellKey)
-            // Validate cache generation — stale entries from a previous generation are discarded
-            // Note: _generation is incremented on structural changes, but cache validation
-            // must account for cells that may have been invalidated by dependency changes
             if (cached._gen === _generation && !dirtyCells.has(cellKey)) {
                 visited.delete(cellKey)
                 return cached.error || cached.computed
@@ -549,9 +637,9 @@ export function createEngine(initialRows = 50, initialCols = 50) {
         }
 
         if (!cell.raw.startsWith('=')) {
-            const numericValue = parseFloat(cell.raw)
+            const numericValue = parseNumberValue(cell.raw)
             visited.delete(cellKey)
-            return isNaN(numericValue) ? cell.raw : numericValue
+            return numericValue !== null ? numericValue : cell.raw
         }
 
         const result = evaluateFormula(cell.raw, (key) => resolveCellValue(key, visited))
@@ -571,29 +659,59 @@ export function createEngine(initialRows = 50, initialCols = 50) {
     function recalculate() {
         if (dirtyCells.size === 0) return
 
-        const affected = new Set(dirtyCells)
-        const sorted = graph.topologicalSort(affected)
-
-        // Process sorted cells first (topological order ensures dependencies are resolved)
-        for (const cell of sorted) {
-            if (dirtyCells.has(cell)) {
-                computedCache.delete(cell)
-                resolveCellValue(cell)
+        if (graph.isEmpty()) {
+            let hasFormula = false
+            for (const cell of dirtyCells) {
+                const c = cells.get(cell)
+                if (c && c.raw && c.raw.startsWith('=')) {
+                    hasFormula = true
+                    break
+                }
+            }
+            if (!hasFormula) {
+                dirtyCells.clear()
+                if (_batchMode) {
+                    _batchCallbacks.forEach(cb => cb())
+                }
+                return
             }
         }
-        // Process any remaining affected cells that weren't in the sorted list
-        // (e.g., cells with no dependencies or circular dependencies)
-        for (const cell of affected) {
-            if (!sorted.includes(cell)) {
-                computedCache.delete(cell)
-                resolveCellValue(cell)
+
+        const affected = new Set()
+        for (const cell of dirtyCells) {
+            const c = cells.get(cell)
+            if ((c && c.raw && c.raw.startsWith('=')) || graph.hasDependents(cell)) {
+                affected.add(cell)
+            }
+        }
+
+        if (affected.size === 0) {
+            dirtyCells.clear()
+            if (_batchMode) {
+                _batchCallbacks.forEach(cb => cb())
+            }
+            return
+        }
+
+        const sorted = graph.topologicalSort(affected)
+
+        for (const cell of sorted) {
+            computedCache.delete(cell)
+            resolveCellValue(cell)
+        }
+
+        if (sorted.length < affected.size) {
+            const sortedSet = new Set(sorted)
+            for (const cell of affected) {
+                if (!sortedSet.has(cell)) {
+                    computedCache.delete(cell)
+                    resolveCellValue(cell)
+                }
             }
         }
 
         dirtyCells.clear()
 
-        // Notify batch listeners if in batch mode
-        // WARNING: Batch mode is currently unused but may be needed for future features
         if (_batchMode) {
             _batchCallbacks.forEach(cb => cb())
         }
@@ -601,28 +719,48 @@ export function createEngine(initialRows = 50, initialCols = 50) {
 
     // ── Core cell operations ──
 
-    function setCellRaw(row, col, raw) {
+    function setCellRaw(row, col, raw, style) {
         const key = cellKey(row, col)
-        graph.removeAllDependencies(key)
-        computedCache.delete(key)
+        if (graph.hasDependencies(key) || graph.hasDependents(key)) {
+            graph.removeAllDependencies(key)
+        }
+        if (computedCache.size > 0) {
+            computedCache.delete(key)
+        }
 
-        if (!raw || raw.trim() === '') {
-            cells.delete(key)
+        const styleObj = style ? { ...style } : undefined
+        const idx = coordIndex(row, col)
+
+        if ((!raw || raw.trim() === '') && !styleObj) {
+            if (cells.has(key)) {
+                cells.delete(key)
+                cellsByIndex.delete(idx)
+                usedRangeDirty = true
+            }
             markCellDirty(key)
             return
         }
 
-        if (raw.startsWith('=')) {
-            cells.set(key, { raw, computed: null, error: null })
+        let record
+        if (raw && raw.startsWith('=')) {
+            record = { raw, computed: null, error: null, style: styleObj }
+            cells.set(key, record)
+            cellsByIndex.set(idx, record)
+            noteOccupied(row, col)
             updateDependencies(key, raw)
             if (graph.hasCycle(key)) {
                 graph.removeAllDependencies(key)
-                cells.set(key, { raw, computed: null, error: '#CYCLE!' })
+                record = { raw, computed: null, error: '#CYCLE!', style: styleObj }
+                cells.set(key, record)
+                cellsByIndex.set(idx, record)
                 markCellDirty(key)
                 return
             }
         } else {
-            cells.set(key, { raw, computed: null, error: null })
+            record = { raw: raw || '', computed: null, error: null, style: styleObj }
+            cells.set(key, record)
+            cellsByIndex.set(idx, record)
+            noteOccupied(row, col)
         }
 
         markCellDirty(key)
@@ -631,22 +769,19 @@ export function createEngine(initialRows = 50, initialCols = 50) {
     function getCellRaw(row, col) {
         const key = cellKey(row, col)
         const cell = cells.get(key)
-        if (!cell) return { raw: '', computed: null, error: null }
+        if (!cell) return { raw: '', computed: null, error: null, style: undefined }
         return { ...cell }
     }
 
-    // ── Snapshot / Restore (for undo of structural changes) ──
+    // ── Snapshot / Restore ──
 
     function takeSnapshot() {
-        // Create a deep copy of all cell data for undo/redo operations
-        // Note: This only captures cell data, not the dependency graph or cache
-        // The dependency graph is rebuilt from the cell formulas when restoring
         const snapshot = new Map()
         for (const [key, value] of cells.entries()) {
-            // Create a shallow copy of the cell object
-            // The cell object contains: { raw: string, computed: number|null, error: string|null }
-            // Note: computed and error are not persisted in snapshots - they're recalculated on restore
-            snapshot.set(key, { ...value })
+            snapshot.set(key, {
+                ...value,
+                style: value.style ? { ...value.style } : undefined
+            })
         }
         return snapshot
     }
@@ -654,14 +789,16 @@ export function createEngine(initialRows = 50, initialCols = 50) {
     function restoreSnapshot(snapshot) {
         cells.clear()
         for (const [key, value] of snapshot.entries()) {
-            cells.set(key, { ...value })
+            cells.set(key, {
+                ...value,
+                style: value.style ? { ...value.style } : undefined
+            })
         }
+        rebuildIndexFromCells()
         graph.clear()
         computedCache.clear()
         dirtyCells.clear()
         _generation++
-        // Rebuild dependency graph from restored cells
-        // Important: This must happen before marking cells dirty to ensure correct dependency tracking
         for (const [key, value] of cells.entries()) {
             if (value.raw && value.raw.startsWith('=')) updateDependencies(key, value.raw)
         }
@@ -689,8 +826,9 @@ export function createEngine(initialRows = 50, initialCols = 50) {
             }
         }
         rows++
+        rebuildIndexFromCells()
         for (const [key, value] of cells.entries()) {
-            if (value.raw.startsWith('=')) updateDependencies(key, value.raw)
+            if (value.raw && value.raw.startsWith('=')) updateDependencies(key, value.raw)
         }
         markAllCellsDirty()
     }
@@ -715,8 +853,9 @@ export function createEngine(initialRows = 50, initialCols = 50) {
             }
         }
         rows--
+        rebuildIndexFromCells()
         for (const [key, value] of cells.entries()) {
-            if (value.raw.startsWith('=')) updateDependencies(key, value.raw)
+            if (value.raw && value.raw.startsWith('=')) updateDependencies(key, value.raw)
         }
         markAllCellsDirty()
     }
@@ -740,8 +879,9 @@ export function createEngine(initialRows = 50, initialCols = 50) {
             }
         }
         cols++
+        rebuildIndexFromCells()
         for (const [key, value] of cells.entries()) {
-            if (value.raw.startsWith('=')) updateDependencies(key, value.raw)
+            if (value.raw && value.raw.startsWith('=')) updateDependencies(key, value.raw)
         }
         markAllCellsDirty()
     }
@@ -766,8 +906,9 @@ export function createEngine(initialRows = 50, initialCols = 50) {
             }
         }
         cols--
+        rebuildIndexFromCells()
         for (const [key, value] of cells.entries()) {
-            if (value.raw.startsWith('=')) updateDependencies(key, value.raw)
+            if (value.raw && value.raw.startsWith('=')) updateDependencies(key, value.raw)
         }
         markAllCellsDirty()
     }
@@ -780,16 +921,118 @@ export function createEngine(initialRows = 50, initialCols = 50) {
         redoStack.length = 0
     }
 
-    function executeSetCell(row, col, value) {
-        const previousValue = getCellRaw(row, col).raw
-        // Only create undo entry if value actually changed
-        // This prevents undo stack pollution with no-op edits
-        if (previousValue !== value) {
-            pushToUndoStack({ type: 'set', r: row, c: col, oldVal: previousValue, newVal: value })
+    function executeSetCell(row, col, value, style) {
+        const key = cellKey(row, col)
+        const current = cells.get(key)
+        const previousValue = current ? current.raw : ''
+        const previousStyle = current ? current.style : undefined
+        const nextStyle = style !== undefined ? (style ? { ...style } : undefined) : previousStyle
+
+        const valChanged = previousValue !== value
+        const styleChanged = !stylesEqual(previousStyle, nextStyle)
+
+        if (valChanged || styleChanged) {
+            pushToUndoStack({
+                type: 'set',
+                r: row,
+                c: col,
+                oldVal: previousValue,
+                newVal: value,
+                oldStyle: previousStyle ? { ...previousStyle } : undefined,
+                newStyle: nextStyle ? { ...nextStyle } : undefined
+            })
         }
-        setCellRaw(row, col, value)
+
+        setCellRaw(row, col, value, nextStyle)
         _generation++
         recalculate()
+    }
+
+    function executeSetCells(changes) {
+        const previous = []
+
+        for (const change of changes) {
+            const key = cellKey(change.row, change.col)
+            const currentCell = cells.get(key)
+            const oldVal = currentCell ? currentCell.raw : ''
+            const oldStyle = currentCell ? currentCell.style : undefined
+            const newVal = change.value !== undefined ? change.value : oldVal
+            const newStyle = change.style !== undefined ? change.style : oldStyle
+
+            const valChanged = oldVal !== newVal
+            const styleChanged = !stylesEqual(oldStyle, newStyle)
+
+            if (valChanged || styleChanged) {
+                previous.push({
+                    r: change.row,
+                    c: change.col,
+                    oldVal,
+                    newVal,
+                    oldStyle: oldStyle ? { ...oldStyle } : undefined,
+                    newStyle: newStyle ? { ...newStyle } : undefined
+                })
+            }
+        }
+
+        if (previous.length === 0) return false
+
+        pushToUndoStack({
+            type: 'bulkSet',
+            changes: previous
+        })
+
+        for (const change of previous) {
+            setCellRaw(change.r, change.c, change.newVal, change.newStyle)
+        }
+
+        _generation++
+        recalculate()
+        return true
+    }
+
+    function executeFill(sourceRange, targetRange, getCellStyle) {
+        if (!sourceRange || !targetRange) return false
+        const targetRow = targetRange.endRow !== undefined ? targetRange.endRow : targetRange.row
+        const targetCol = targetRange.endCol !== undefined ? targetRange.endCol : targetRange.col
+        const maxRow = Math.max(sourceRange.startRow, sourceRange.endRow, targetRow ?? 0)
+        const maxCol = Math.max(sourceRange.startCol, sourceRange.endCol, targetCol ?? 0)
+        if (maxRow >= rows || maxCol >= cols) {
+            ensureCapacity(maxRow + 1, maxCol + 1)
+        }
+        const changes = computeFillChanges(getCellForDisplay, sourceRange, targetRange, getCellStyle)
+        if (changes.length === 0) return false
+
+        // For fill, we must always record old values for ALL target cells in the undo
+        // entry, even when the new value matches the old. This ensures undo can
+        // correctly restore cells that happened to already contain the same value
+        // as the generated fill series.
+        const previous = []
+        for (const change of changes) {
+            const key = cellKey(change.row, change.col)
+            const currentCell = cells.get(key)
+            const oldVal = currentCell ? currentCell.raw : ''
+            const oldStyle = currentCell ? currentCell.style : undefined
+            const newVal = change.value !== undefined ? change.value : oldVal
+            const newStyle = change.style !== undefined ? change.style : oldStyle
+            previous.push({
+                r: change.row,
+                c: change.col,
+                oldVal,
+                newVal,
+                oldStyle: oldStyle ? { ...oldStyle } : undefined,
+                newStyle: newStyle ? { ...newStyle } : undefined
+            })
+        }
+
+        pushToUndoStack({ type: 'bulkSet', changes: previous })
+
+        for (const change of previous) {
+            setCellRaw(change.r, change.c, change.newVal, change.newStyle)
+        }
+
+        _generation++
+        recalculate()
+        return true
     }
 
     function executeInsertRow(atIndex) {
@@ -828,17 +1071,30 @@ export function createEngine(initialRows = 50, initialCols = 50) {
         if (undoStack.length === 0) return false
         const entry = undoStack.pop()
 
+        if (entry.type === 'meta' || entry.type === 'layout') {
+            redoStack.push(entry)
+            return entry
+        }
+
+        if (entry.type === 'bulkSet') {
+            redoStack.push(entry)
+
+            for (const change of entry.changes) {
+                setCellRaw(change.r, change.c, change.oldVal, change.oldStyle)
+            }
+
+            _generation++
+            recalculate()
+            return entry
+        }
+
         if (entry.type === 'set') {
-            // For cell edits, swap current value to redo stack and restore old value
-            const currentValue = getCellRaw(entry.r, entry.c).raw
-            redoStack.push({ ...entry, newVal: currentValue })
-            setCellRaw(entry.r, entry.c, entry.oldVal)
+            const currentCell = getCellRaw(entry.r, entry.c)
+            redoStack.push({ ...entry, newVal: currentCell.raw, newStyle: currentCell.style })
+            setCellRaw(entry.r, entry.c, entry.oldVal, entry.oldStyle)
             _generation++
             recalculate()
         } else {
-            // For structural changes (row/col insert/delete), save current state to redo
-            // and restore the snapshot from undo entry
-            // Note: The snapshot contains the cell data, but rows/cols must be restored separately
             redoStack.push({
                 ...entry,
                 restoreSnap: takeSnapshot(),
@@ -846,23 +1102,38 @@ export function createEngine(initialRows = 50, initialCols = 50) {
                 restoreCols: cols
             })
             restoreSnapshot(entry.snap)
-            // Restore grid dimensions - this must happen after restoreSnapshot
-            // because restoreSnapshot increments _generation but doesn't modify rows/cols
             if (entry.type === 'rowins' || entry.type === 'rowdel') rows = entry.oldRows
             else if (entry.type === 'colins' || entry.type === 'coldel') cols = entry.oldCols
             recalculate()
         }
-        return true
+        return entry
     }
 
     function redo() {
         if (redoStack.length === 0) return false
         const entry = redoStack.pop()
 
+        if (entry.type === 'meta' || entry.type === 'layout') {
+            undoStack.push(entry)
+            return entry
+        }
+
+        if (entry.type === 'bulkSet') {
+            undoStack.push(entry)
+
+            for (const change of entry.changes) {
+                setCellRaw(change.r, change.c, change.newVal, change.newStyle)
+            }
+
+            _generation++
+            recalculate()
+            return entry
+        }
+
         if (entry.type === 'set') {
-            const currentValue = getCellRaw(entry.r, entry.c).raw
-            undoStack.push({ ...entry, oldVal: currentValue })
-            setCellRaw(entry.r, entry.c, entry.newVal)
+            const currentCell = getCellRaw(entry.r, entry.c)
+            undoStack.push({ ...entry, oldVal: currentCell.raw, oldStyle: currentCell.style })
+            setCellRaw(entry.r, entry.c, entry.newVal, entry.newStyle)
             _generation++
             recalculate()
         } else {
@@ -877,37 +1148,130 @@ export function createEngine(initialRows = 50, initialCols = 50) {
             cols = entry.restoreCols
             recalculate()
         }
-        return true
+        return entry
     }
 
-    // ── Public cell display (returns raw + computed + error) ──
+    function getUsedRange() {
+        if (usedRangeDirty) rebuildUsedRange()
+
+        if (usedMaxRow === -1) {
+            return { startRow: 0, startCol: 0, endRow: rows - 1, endCol: cols - 1 }
+        }
+
+        return {
+            startRow: 0,
+            startCol: 0,
+            endRow: usedMaxRow,
+            endCol: usedMaxCol
+        }
+    }
+
+    function clearRange(range) {
+        if (!range) return false
+        const r1 = Math.min(range.startRow, range.endRow)
+        const r2 = Math.max(range.startRow, range.endRow)
+        const c1 = Math.min(range.startCol, range.endCol)
+        const c2 = Math.max(range.startCol, range.endCol)
+
+        const changes = []
+        for (let r = r1; r <= r2; r++) {
+            for (let c = c1; c <= c2; c++) {
+                const cur = getCellRaw(r, c)
+                if (cur.raw !== '' || cur.style) {
+                    changes.push({ row: r, col: c, value: '', style: undefined })
+                }
+            }
+        }
+        if (changes.length === 0) return false
+        return executeSetCells(changes)
+    }
+
+    function setRangeStyle(range, styleUpdates) {
+        if (!range || !styleUpdates) return false
+        const r1 = Math.min(range.startRow, range.endRow)
+        const r2 = Math.max(range.startRow, range.endRow)
+        const c1 = Math.min(range.startCol, range.endCol)
+        const c2 = Math.max(range.startCol, range.endCol)
+
+        const changes = []
+        for (let r = r1; r <= r2; r++) {
+            for (let c = c1; c <= c2; c++) {
+                const cur = getCellRaw(r, c)
+                const existingStyle = cur.style || {}
+                const newStyle = { ...existingStyle, ...styleUpdates }
+                changes.push({ row: r, col: c, value: cur.raw, style: newStyle })
+            }
+        }
+        if (changes.length === 0) return false
+        return executeSetCells(changes)
+    }
+
+    // ── Public cell display (returns raw + computed + error + style) ──
 
     function getCellForDisplay(row, col) {
         const cell = getCellRaw(row, col)
         const key = cellKey(row, col)
-        // Resolve the computed value (this may trigger recalculation if the cell is dirty)
-        // The resolveCellValue function handles caching and dependency resolution
         const value = resolveCellValue(key)
 
-        // Error values are strings starting with '#' (e.g., '#CYCLE!', '#VALUE!')
         if (typeof value === 'string' && value.startsWith('#')) {
-            return { raw: cell.raw, computed: null, error: value }
+            return { raw: cell.raw, computed: null, error: value, style: cell.style }
         }
-        // Return the computed value (which may be a number or string)
-        // Note: Empty cells return '' as computed value, not null
-        return { raw: cell.raw, computed: value, error: null }
+        return { raw: cell.raw, computed: value, error: null, style: cell.style }
+    }
+
+    function getCellFast(row, col) {
+        const cell = cellsByIndex.get(coordIndex(row, col))
+        if (!cell || !cell.raw) return ''
+        if (cell.raw.charCodeAt(0) !== 61) return cell.raw
+        if (cell.computed !== null && cell.computed !== undefined && cell.computed !== '') return cell.computed
+        return resolveCellValue(cellKey(row, col))
     }
 
     // ── Public API ──
-    // The engine exposes a limited API to prevent direct access to internal state
-    // All cell operations go through the public methods which handle undo/redo,
-    // dependency tracking, and cache invalidation automatically
+
+    let _rowIdentities = new Map()
+
+    function sort(col, direction = 'asc', options = {}) {
+        const result = executeSort(
+            {
+                get cols() { return cols },
+                getCell: getCellForDisplay,
+                getCellRaw,
+                getUsedRange,
+                setCells: executeSetCells
+            },
+            {
+                col,
+                direction,
+                rowIdentities: _rowIdentities,
+                ...options
+            }
+        )
+        if (result.rowIdentities) {
+            _rowIdentities = result.rowIdentities
+        }
+        return result.success
+    }
+
+    function ensureCapacity(minRows, minCols) {
+        if (minRows > rows) rows = minRows
+        if (minCols > cols) cols = minCols
+    }
 
     return {
         get rows() { return rows },
         get cols() { return cols },
         getCell: getCellForDisplay,
+        getCellFast,
+        getCellRaw,
         setCell: executeSetCell,
+        setCells: executeSetCells,
+        fill: executeFill,
+        sort,
+        clearRange,
+        setRangeStyle,
+        getUsedRange,
+        shiftFormula,
         insertRow: executeInsertRow,
         deleteRow: executeDeleteRow,
         insertColumn: executeInsertColumn,
@@ -916,13 +1280,16 @@ export function createEngine(initialRows = 50, initialCols = 50) {
         redo,
         canUndo: () => undoStack.length > 0,
         canRedo: () => redoStack.length > 0,
-        // Grow the grid so that at least minRows x minCols exist. The engine is
-        // sparse, so this only moves the bounds; nothing is allocated.
-        ensureCapacity: (minRows, minCols) => {
-            if (minRows > rows) rows = minRows
-            if (minCols > cols) cols = minCols
+        getUndoSize: () => undoStack.length,
+        ensureCapacity,
+        recordUndo: (entry) => {
+            pushToUndoStack(entry || { type: 'meta' })
         },
-        // Internal state is not exposed - if you need to serialize/deserialize,
-        // you'll need to work with the public API or add new methods
+        annotateLastUndo: (fields) => {
+            if (undoStack.length === 0 || !fields) return
+            Object.assign(undoStack[undoStack.length - 1], fields)
+        },
+        peekUndo: () => undoStack.length ? undoStack[undoStack.length - 1] : null,
+        peekRedo: () => redoStack.length ? redoStack[redoStack.length - 1] : null,
     }
 }

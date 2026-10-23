@@ -15,11 +15,13 @@ function loadTsv(engine, text) {
     const rows = parseTsv(text)
     const cols = Math.max(...rows.map(r => r.length))
     engine.ensureCapacity(rows.length + 20, cols + 5)
+    const changes = []
     for (let r = 0; r < rows.length; r++) {
         for (let c = 0; c < rows[r].length; c++) {
-            engine.setCell(r, c, rows[r][c])
+            changes.push({ row: r, col: c, value: rows[r][c] })
         }
     }
+    engine.setCells(changes)
     return { rows: rows.length, cols }
 }
 

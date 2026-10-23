@@ -40,14 +40,69 @@ export function createHttpProvider(config = {}) {
     return {
         name: 'http',
         async complete(request) {
-            // TODO (candidate): call the LLM API of your choice with fetch().
-            //   - send request.system as the system prompt, request.history then
-            //     request.user as the conversation turns
-            //   - return { text: <model text>, provider: 'http' }
-            //   - surface network / auth / rate-limit failures as thrown Errors
-            //     with a readable message; the UI must show them, never swallow them
-            void endpoint; void apiKey; void model; void request
-            throw new Error('createHttpProvider is not implemented yet — wire it to the API of your choice (src/ai/provider.js)')
+            if (!endpoint) {
+                throw new Error('PROVIDER_ERROR: VITE_AI_ENDPOINT is not configured in .env.local')
+            }
+
+            const messages = []
+            if (request.system) {
+                messages.push({ role: 'system', content: request.system })
+            }
+            if (request.history && Array.isArray(request.history)) {
+                for (const turn of request.history) {
+                    messages.push({ role: turn.role, content: turn.content })
+                }
+            }
+            if (request.user) {
+                messages.push({ role: 'user', content: request.user })
+            }
+
+            const headers = {
+                'Content-Type': 'application/json'
+            }
+            if (apiKey) {
+                headers['Authorization'] = `Bearer ${apiKey}`
+            }
+
+            let response
+            try {
+                response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify({
+                        model: model || 'default',
+                        messages,
+                        temperature: 0
+                    })
+                })
+            } catch (networkErr) {
+                throw new Error(`PROVIDER_ERROR (Network failure): ${networkErr.message}`)
+            }
+
+            if (!response.ok) {
+                const status = response.status
+                let body = ''
+                try {
+                    body = await response.text()
+                } catch {
+                    body = response.statusText
+                }
+
+                if (status === 401 || status === 403) {
+                    throw new Error(`PROVIDER_ERROR (Authentication error ${status}): Invalid or missing API key`)
+                } else if (status === 429) {
+                    throw new Error(`PROVIDER_ERROR (Rate limit exceeded ${status}): Too many requests`)
+                } else {
+                    throw new Error(`PROVIDER_ERROR (HTTP ${status}): ${body || response.statusText}`)
+                }
+            }
+
+            const data = await response.json()
+            const modelText = data?.choices?.[0]?.message?.content || data?.text || data?.content?.[0]?.text || ''
+            return {
+                text: modelText,
+                provider: 'http'
+            }
         },
     }
 }

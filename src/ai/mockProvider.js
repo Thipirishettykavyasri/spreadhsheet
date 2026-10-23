@@ -29,12 +29,29 @@ function wrap(action) {
     return shapes[json.length % shapes.length]()
 }
 
+function lookupPlan(userText) {
+    const n = normalize(userText)
+    if (TABLE.has(n)) return TABLE.get(n)
+
+    // User turns include sheet context plus the prompt. Prefer the longest
+    // golden prompt contained in the message so wrapping does not miss.
+    let bestKey = ''
+    let bestPlan = null
+    for (const [key, plan] of TABLE.entries()) {
+        if (key && n.includes(key) && key.length >= bestKey.length) {
+            bestKey = key
+            bestPlan = plan
+        }
+    }
+    return bestPlan
+}
+
 export function createMockProvider() {
     return {
         name: 'mock',
         async complete({ user }) {
             await new Promise(resolve => setTimeout(resolve, 150)) // pretend to be a network call
-            const hit = TABLE.get(normalize(user))
+            const hit = lookupPlan(user)
             if (hit) return { text: wrap(hit), provider: 'mock' }
             return {
                 text: wrap({

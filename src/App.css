@@ -260,6 +260,7 @@ body {
 
 /* Column headers */
 .col-header-blank {
+  cursor: pointer;
   width: 50px;
   min-width: 50px;
   background: #f8f9fa;
@@ -274,6 +275,7 @@ body {
 }
 
 .col-header {
+  cursor: pointer;
   width: 120px;
   min-width: 120px;
   background: #f8f9fa;
@@ -297,6 +299,7 @@ body {
 
 /* Row header */
 .row-header {
+  cursor: pointer;
   background: #f8f9fa;
   border: 1px solid #dadce0;
   font-size: 12px;
@@ -407,4 +410,36 @@ body {
 
 .grid-scroll::-webkit-scrollbar-thumb:hover {
   background: #bdc1c6;
+}
+
+
+.cell.range-selected {
+  background-color: #d2e3fc !important;
+  outline: 1px solid #4285f4;
+}
+
+.cell.range-selected .cell-display {
+  background-color: #d2e3fc;
+}
+
+.cell.selected {
+  position: relative;
+}
+
+.fill-handle {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  right: -4px;
+  bottom: -4px;
+  background: #1a73e8;
+  border: 1px solid white;
+  cursor: crosshair;
+  z-index: 5;
+}
+
+
+.cell.fill-target-preview {
+  outline: 1px dashed #1a73e8 !important;
+  background-color: #e8f0fe !important;
 }
